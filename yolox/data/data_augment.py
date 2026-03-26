@@ -159,10 +159,13 @@ def preproc(img, input_size, swap=(2, 0, 1)):
 
 
 class TrainTransform:
-    def __init__(self, max_labels=50, flip_prob=0.5, hsv_prob=1.0):
+    def __init__(self, max_labels=50, flip_prob=0.5, hsv_prob=1.0,
+                 grayscale_prob=0.0, blur_prob=0.0):
         self.max_labels = max_labels
         self.flip_prob = flip_prob
         self.hsv_prob = hsv_prob
+        self.grayscale_prob = grayscale_prob  # 색상 무시, 형태 학습
+        self.blur_prob = blur_prob            # 카메라 흔들림/초점 다양화
 
     def __call__(self, image, targets, input_dim):
         boxes = targets[:, :4].copy()
@@ -182,6 +185,14 @@ class TrainTransform:
 
         if random.random() < self.hsv_prob:
             augment_hsv(image)
+        # 색상/질감 의존도 낮추기: 랜덤 그레이스케일
+        if self.grayscale_prob > 0 and random.random() < self.grayscale_prob:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        # 초점·거리 다양성: 랜덤 가우시안 블러
+        if self.blur_prob > 0 and random.random() < self.blur_prob:
+            ksize = random.choice([3, 5])
+            image = cv2.GaussianBlur(image, (ksize, ksize), 0)
         image_t, boxes = _mirror(image, boxes, self.flip_prob)
         height, width, _ = image_t.shape
         image_t, r_ = preproc(image_t, input_dim)

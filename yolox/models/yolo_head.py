@@ -24,13 +24,16 @@ class YOLOXHead(nn.Module):
         in_channels=[256, 512, 1024],
         act="silu",
         depthwise=False,
+        obj_weight=1.0,
     ):
         """
         Args:
             act (str): activation type of conv. Defalut value: "silu".
             depthwise (bool): whether apply depthwise conv in conv branch. Defalut value: False.
+            obj_weight (float): weight for objectness loss. Increase to reduce false positives.
         """
         super().__init__()
+        self.obj_weight = obj_weight
 
         self.num_classes = num_classes
         self.decode_in_inference = True  # for deploy, set to False
@@ -401,12 +404,12 @@ class YOLOXHead(nn.Module):
             loss_l1 = 0.0
 
         reg_weight = 5.0
-        loss = reg_weight * loss_iou + loss_obj + loss_cls + loss_l1
+        loss = reg_weight * loss_iou + self.obj_weight * loss_obj + loss_cls + loss_l1
 
         return (
             loss,
             reg_weight * loss_iou,
-            loss_obj,
+            self.obj_weight * loss_obj,
             loss_cls,
             loss_l1,
             num_fg / max(num_gts, 1),

@@ -301,6 +301,9 @@ class COCOEvaluator:
             cocoEval = COCOeval(cocoGt, cocoDt, annType[1])
             cocoEval.evaluate()
             cocoEval.accumulate()
+            # figure 생성을 위해 마지막 cocoEval 보존
+            self._last_coco_eval = cocoEval
+            self._last_coco_gt = cocoGt
             redirect_string = io.StringIO()
             with contextlib.redirect_stdout(redirect_string):
                 cocoEval.summarize()

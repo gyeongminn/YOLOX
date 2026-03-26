@@ -146,7 +146,9 @@ class Exp(BaseExp):
             preproc=TrainTransform(
                 max_labels=50,
                 flip_prob=self.flip_prob,
-                hsv_prob=self.hsv_prob
+                hsv_prob=self.hsv_prob,
+                grayscale_prob=getattr(self, "grayscale_prob", 0.0),
+                blur_prob=getattr(self, "blur_prob", 0.0),
             ),
             cache=cache,
             cache_type=cache_type,
@@ -187,7 +189,10 @@ class Exp(BaseExp):
             preproc=TrainTransform(
                 max_labels=120,
                 flip_prob=self.flip_prob,
-                hsv_prob=self.hsv_prob),
+                hsv_prob=self.hsv_prob,
+                grayscale_prob=getattr(self, "grayscale_prob", 0.0),
+                blur_prob=getattr(self, "blur_prob", 0.0),
+            ),
             degrees=self.degrees,
             translate=self.translate,
             mosaic_scale=self.mosaic_scale,
@@ -216,6 +221,11 @@ class Exp(BaseExp):
         # Make sure each process has different random seed, especially for 'fork' method.
         # Check https://github.com/pytorch/pytorch/issues/63311 for more details.
         dataloader_kwargs["worker_init_fn"] = worker_init_reset_seed
+
+        # Windows(spawn)에서 매 에폭마다 워커를 재생성하는 오버헤드 제거
+        if self.data_num_workers > 0:
+            dataloader_kwargs["persistent_workers"] = True
+            dataloader_kwargs["prefetch_factor"] = 2
 
         train_loader = DataLoader(self.dataset, **dataloader_kwargs)
 
