@@ -7,6 +7,10 @@ import time
 from loguru import logger
 
 import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
@@ -59,6 +63,15 @@ class Trainer:
 
         # metric record
         self.meter = MeterBuffer(window_size=exp.print_interval)
+
+        # figure 생성용 히스토리
+        self._loss_history = {
+            "total_loss": [], "iou_loss": [], "conf_loss": [], "cls_loss": [], "l1_loss": []
+        }
+        self._ap_history = {"ap50_95": [], "ap50": []}
+        self._lr_history = []
+        self._epoch_loss_accum = {k: [] for k in self._loss_history}
+        self._epoch_loss_accum["lr"] = []
         self.file_name = os.path.join(exp.output_dir, args.experiment_name)
 
         if self.rank == 0:
@@ -127,6 +140,12 @@ class Trainer:
             lr=lr,
             **outputs,
         )
+
+        # 에폭 평균 계산용 누적
+        for k in ["total_loss", "iou_loss", "conf_loss", "cls_loss", "l1_loss"]:
+            if k in outputs:
+                self._epoch_loss_accum[k].append(float(outputs[k]))
+        self._epoch_loss_accum["lr"].append(float(lr))
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
@@ -232,9 +251,22 @@ class Trainer:
     def after_epoch(self):
         self.save_ckpt(ckpt_name="latest")
 
+        # 에폭 평균 손실 기록
+        for k in self._loss_history:
+            vals = self._epoch_loss_accum[k]
+            self._loss_history[k].append(sum(vals) / len(vals) if vals else 0.0)
+        lr_vals = self._epoch_loss_accum["lr"]
+        self._lr_history.append(lr_vals[-1] if lr_vals else 0.0)
+        for k in self._epoch_loss_accum:
+            self._epoch_loss_accum[k].clear()
+
         if (self.epoch + 1) % self.exp.eval_interval == 0:
             all_reduce_norm(self.model)
             self.evaluate_and_save_model()
+
+        # 10 에폭마다 figure 저장
+        if self.rank == 0 and (self.epoch + 1) % 10 == 0:
+            self._save_training_figures()
 
     def before_iter(self):
         pass
@@ -316,7 +348,7 @@ class Trainer:
             else:
                 ckpt_file = self.args.ckpt
 
-            ckpt = torch.load(ckpt_file, map_location=self.device)
+            ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
             # resume the model/optimizer state dict
             model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
@@ -337,7 +369,7 @@ class Trainer:
             if self.args.ckpt is not None:
                 logger.info("loading checkpoint for fine tuning")
                 ckpt_file = self.args.ckpt
-                ckpt = torch.load(ckpt_file, map_location=self.device)["model"]
+                ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)["model"]
                 model = load_ckpt(model, ckpt)
             self.start_epoch = 0
 
@@ -358,6 +390,10 @@ class Trainer:
 
         update_best_ckpt = ap50_95 > self.best_ap
         self.best_ap = max(self.best_ap, ap50_95)
+
+        # AP 히스토리 기록
+        self._ap_history["ap50_95"].append(float(ap50_95))
+        self._ap_history["ap50"].append(float(ap50))
 
         if self.rank == 0:
             if self.args.logger == "tensorboard":
@@ -395,6 +431,95 @@ class Trainer:
                 }
             self.mlflow_logger.save_checkpoints(self.args, self.exp, self.file_name, self.epoch,
                                                 metadata, update_best_ckpt)
+
+    def _save_training_figures(self):
+        fig_dir = os.path.join(self.file_name, "figures")
+        os.makedirs(fig_dir, exist_ok=True)
+
+        epoch_num = self.epoch + 1
+        epochs = list(range(1, epoch_num + 1))
+        ap_epochs = list(range(1, len(self._ap_history["ap50_95"]) + 1))
+
+        fig = plt.figure(figsize=(18, 12))
+        fig.suptitle(
+            f"{self.exp.exp_name}  —  Epoch {epoch_num}  |  Best AP50:95 = {self.best_ap * 100:.2f}%",
+            fontsize=14, fontweight="bold"
+        )
+        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.4, wspace=0.35)
+
+        # 1) Total Loss
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax1.plot(epochs, self._loss_history["total_loss"], color="steelblue", linewidth=1.5)
+        ax1.set_title("Total Loss")
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Loss")
+        ax1.grid(True, alpha=0.3)
+
+        # 2) Component Losses
+        ax2 = fig.add_subplot(gs[0, 1])
+        for key, color in [("iou_loss", "tomato"), ("conf_loss", "darkorange"),
+                           ("cls_loss", "mediumseagreen"), ("l1_loss", "mediumpurple")]:
+            ax2.plot(epochs, self._loss_history[key], label=key, color=color, linewidth=1.2)
+        ax2.set_title("Component Losses")
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Loss")
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3)
+
+        # 3) Learning Rate
+        ax3 = fig.add_subplot(gs[0, 2])
+        ax3.plot(epochs, self._lr_history, color="slateblue", linewidth=1.5)
+        ax3.set_title("Learning Rate")
+        ax3.set_xlabel("Epoch")
+        ax3.set_ylabel("LR")
+        ax3.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+        ax3.grid(True, alpha=0.3)
+
+        # 4) AP50:95
+        ax4 = fig.add_subplot(gs[1, 0])
+        if ap_epochs:
+            ax4.plot(ap_epochs, [v * 100 for v in self._ap_history["ap50_95"]],
+                     color="royalblue", linewidth=1.5, marker=".")
+            best_val = max(self._ap_history["ap50_95"]) * 100
+            ax4.axhline(best_val, color="royalblue", linestyle="--", alpha=0.5,
+                        label=f"Best {best_val:.2f}%")
+            ax4.legend(fontsize=8)
+        ax4.set_title("AP@[0.50:0.95]")
+        ax4.set_xlabel("Epoch")
+        ax4.set_ylabel("AP (%)")
+        ax4.grid(True, alpha=0.3)
+
+        # 5) AP50
+        ax5 = fig.add_subplot(gs[1, 1])
+        if ap_epochs:
+            ax5.plot(ap_epochs, [v * 100 for v in self._ap_history["ap50"]],
+                     color="mediumseagreen", linewidth=1.5, marker=".")
+            best_val50 = max(self._ap_history["ap50"]) * 100
+            ax5.axhline(best_val50, color="mediumseagreen", linestyle="--", alpha=0.5,
+                        label=f"Best {best_val50:.2f}%")
+            ax5.legend(fontsize=8)
+        ax5.set_title("AP@0.50")
+        ax5.set_xlabel("Epoch")
+        ax5.set_ylabel("AP (%)")
+        ax5.grid(True, alpha=0.3)
+
+        # 6) AP50 vs AP50:95 비교
+        ax6 = fig.add_subplot(gs[1, 2])
+        if ap_epochs:
+            ax6.plot(ap_epochs, [v * 100 for v in self._ap_history["ap50_95"]],
+                     color="royalblue", linewidth=1.5, label="AP50:95")
+            ax6.plot(ap_epochs, [v * 100 for v in self._ap_history["ap50"]],
+                     color="mediumseagreen", linewidth=1.5, label="AP50")
+            ax6.legend(fontsize=8)
+        ax6.set_title("AP Comparison")
+        ax6.set_xlabel("Epoch")
+        ax6.set_ylabel("AP (%)")
+        ax6.grid(True, alpha=0.3)
+
+        save_path = os.path.join(fig_dir, f"epoch_{epoch_num:04d}.png")
+        fig.savefig(save_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"Training figure saved → {save_path}")
 
     def save_ckpt(self, ckpt_name, update_best_ckpt=False, ap=None):
         if self.rank == 0:
