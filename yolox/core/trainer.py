@@ -144,7 +144,8 @@ class Trainer:
         # 에폭 평균 계산용 누적
         for k in ["total_loss", "iou_loss", "conf_loss", "cls_loss", "l1_loss"]:
             if k in outputs:
-                self._epoch_loss_accum[k].append(float(outputs[k]))
+                v = outputs[k]
+                self._epoch_loss_accum[k].append(v.detach().item() if hasattr(v, "detach") else float(v))
         self._epoch_loss_accum["lr"].append(float(lr))
 
     def before_train(self):

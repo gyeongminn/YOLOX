@@ -21,7 +21,7 @@ class Exp(MyExp):
         self.num_classes = 1
 
         self.max_epoch = 500
-        self.data_num_workers = 6
+        self.data_num_workers = 4
         self.eval_interval = 1
 
         # FP 억제: 마지막 no_aug 구간을 늘려 정밀 수렴 시간 확보
